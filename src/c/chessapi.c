@@ -103,6 +103,7 @@ struct Board {
     bool can_castle_bk;
     bool can_castle_wq;
     bool can_castle_wk;
+    bool is_threefold_draw;
     int halfmoves;
     int fullmoves;
     uint64_t hash;
@@ -460,6 +461,7 @@ static Board *create_board() {
     board->can_castle_bq = false;
     board->can_castle_wk = false;
     board->can_castle_wq = false;
+    board->is_threefold_draw = false;
     board->fullmoves = 1;
     board->halfmoves = 0;
     board->last_board = NULL;
@@ -481,6 +483,31 @@ static Board *clone_board(Board * board) {
         new_board->last_board->refcount++;
     }
     return new_board;
+}
+
+// Returns true if a threefold repetition has occurred on [board]
+static bool is_threefold_draw(Board *board) {
+
+    int found_count = 1; /* This board has already been found */
+    int pawn_count = count_bits_set(board->bb_white_pawn | board->bb_black_pawn);
+    for (Board *b = board->last_board; b != 0; b = b->last_board)
+    {
+        int pc = count_bits_set(b->bb_white_pawn | b->bb_black_pawn);
+        if (pawn_count < pc) {
+            break; /* The number of pawns can never go up so once an earlier board has more pawns we can stop searching */
+        }
+
+        if (board_equals(board, b))
+        {
+            ++found_count;
+            if (found_count >= 3)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 // Updates the [board] with the result of the given [move].
@@ -590,6 +617,9 @@ static void make_move(Board *board, Move move) {
         board->whiteToMove = !board->whiteToMove;
         hash ^= zobrist_keys[772];  // update color-to-play hash
         board->hash = hash;  // commit hash
+
+        // Update is-threefold-draw flag
+        board->is_threefold_draw = board->is_threefold_draw || is_threefold_draw(board);
         return;
     }
     if (move.capture) {
@@ -699,6 +729,9 @@ static void make_move(Board *board, Move move) {
     board->whiteToMove = !board->whiteToMove;
     hash ^= zobrist_keys[772];  // update color-to-play hash
     board->hash = hash;  // commit hash
+
+    // Update is-threefold-draw flag
+    board->is_threefold_draw = board->is_threefold_draw || is_threefold_draw(board);
 }
 
 // Restores the previous board state for [board] if it exists.
@@ -715,6 +748,7 @@ static void undo_move(Board *board) {
     board->can_castle_bq = restore->can_castle_bq;
     board->can_castle_wk = restore->can_castle_wk;
     board->can_castle_wq = restore->can_castle_wq;
+    board->is_threefold_draw = restore->is_threefold_draw;
     board->halfmoves = restore->halfmoves;
     board->fullmoves = restore->fullmoves;
     board->whiteToMove = restore->whiteToMove;
@@ -1768,38 +1802,10 @@ static void start_chess_api() {
     semaphore_wait(&API->intermission_mutex);
 }
 
-// Returns true if a threefold repetition has occurred on [board]
-static bool is_threefold_draw(Board *current_board) {
-
-    for (Board *board = current_board; board != 0; board = board->last_board)
-    {
-        int found_count = 1; /* This board has already been found */
-        int pawn_count = count_bits_set(board->bb_white_pawn | board->bb_black_pawn);
-        for (Board *b = board->last_board; b != 0; b = b->last_board)
-        {
-            int pc = count_bits_set(b->bb_white_pawn | b->bb_black_pawn);
-            if (pawn_count < pc) {
-                break; /* The number of pawns can never go up so once an earlier board has more pawns we can stop searching */
-            }
-
-            if (board_equals(board, b))
-            {
-                ++found_count;
-                if (found_count >= 3)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-
-    return false;
-}
-
 // Returns GAME_NORMAL, GAME_STALEMATE or GAME_CHECKMATE based on the state on [board]
 static GameState get_board_end_state(Board *board) {
     if (board->halfmoves >= 50) return GAME_STALEMATE;
-    if (is_threefold_draw(board)) return GAME_STALEMATE;
+    if (board->is_threefold_draw) return GAME_STALEMATE;
     int num_legal_moves;
     free(get_legal_moves(board, &num_legal_moves));
     if (num_legal_moves > 0) return GAME_NORMAL;
@@ -1944,7 +1950,7 @@ bool chess_in_checkmate(Board *board) {
 
 bool chess_in_draw(Board *board) {
     if (board->halfmoves >= 50) return true;
-    if (is_threefold_draw(board)) return true;
+    if (board->is_threefold_draw) return true;
     int num_legal_moves;
     free(get_legal_moves(board, &num_legal_moves));
     if (num_legal_moves > 0) return false;
